@@ -39,7 +39,7 @@ function pdo(): PDO {
     if (!is_file($configPath)) fail('Bitte zuerst config.php mit den ALL-INKL-Datenbankzugangsdaten anlegen.', 503);
     $config = require $configPath;
     try {
-        $db = new PDO($config['dsn'], $config['username'], $config['password'], [PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION, PDO::ATTR_DEFAULT_FETCH_MODE => PDO::FETCH_ASSOC]);
+        $db = new PDO($config['dsn'], $config['username'], $config['password'], [PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION, PDO::ATTR_DEFAULT_FETCH_MODE => PDO::FETCH_ASSOC, PDO::ATTR_TIMEOUT => 5]);
         $db->exec("CREATE TABLE IF NOT EXISTS fo_meta (meta_key VARCHAR(64) PRIMARY KEY, meta_value LONGTEXT NOT NULL) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci");
         $db->exec("CREATE TABLE IF NOT EXISTS fo_records (kind VARCHAR(24) NOT NULL, record_id VARCHAR(100) NOT NULL, record_json LONGTEXT NOT NULL, revision INT NOT NULL, PRIMARY KEY(kind,record_id)) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci");
         $db->exec("CREATE TABLE IF NOT EXISTS fo_completions (task_id VARCHAR(100) NOT NULL, day_key VARCHAR(10) NOT NULL, member_id VARCHAR(100) NOT NULL, points INT NOT NULL, title VARCHAR(160) NOT NULL, completed_at VARCHAR(40) NOT NULL, PRIMARY KEY(task_id,day_key)) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci");

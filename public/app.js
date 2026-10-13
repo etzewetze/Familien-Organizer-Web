@@ -97,10 +97,10 @@ function toast(message, error = false) {
 async function api(path, method = 'GET', data) {
   const options = { method, headers: { 'X-Family-Request': '1' } };
   if (data !== undefined) { options.headers['Content-Type'] = 'application/json'; options.body = JSON.stringify(data); }
-  let response;
-  try { response = await fetch('/api' + path, options); }
-  catch { throw new Error('Der Server ist gerade nicht erreichbar. Bitte die Verbindung prüfen.'); }
-  const output = await response.json();
+  let response, output; const controller = new AbortController(), timer = setTimeout(() => controller.abort(), 15000);
+  try { response = await fetch('/api' + path, { ...options, signal: controller.signal }); output = await response.json(); }
+  catch (error) { throw new Error(error?.name === 'AbortError' ? 'Der Server hat nicht rechtzeitig geantwortet. Bitte Datenbank und /api/status prüfen.' : 'Der Server ist gerade nicht erreichbar. Bitte die Verbindung prüfen.'); }
+  finally { clearTimeout(timer); }
   if (!response.ok) { if (response.status === 401 && output.code === 'SESSION_EXPIRED') { requireLogin(output.version); } throw new Error(output.error || 'Die Anfrage ist fehlgeschlagen.'); }
   return output;
 }
