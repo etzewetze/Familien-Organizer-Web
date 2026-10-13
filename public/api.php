@@ -4,6 +4,7 @@ declare(strict_types=1);
 // Shared-hosting API entry point. The browser UI is served as static files;
 // all persistent state lives in MariaDB, never in the public web directory.
 const APP_KINDS = ['members', 'events', 'birthdays', 'tasks', 'recipes', 'meals', 'lists', 'items', 'notes', 'rewards', 'pointAwards'];
+const APP_VERSION = '0.2.0-allinkl';
 const APP_SETTINGS = [
     'familyName' => 'Unsere Familie', 'timezone' => 'Europe/Berlin', 'photoInterval' => 15, 'photoFit' => 'contain',
     'remoteManifestUrl' => '', 'immichUrl' => '', 'immichAlbumId' => '',
@@ -11,10 +12,10 @@ const APP_SETTINGS = [
     'surfaceColor' => '#ffffff', 'navColor' => '#172237', 'accentColor' => '#4f46e5', 'textColor' => '#20283d',
     'backgroundImage' => '', 'calendarHourSize' => 64, 'calendarAutoWidth' => true, 'calendarCompactHours' => true,
 ];
-const APP_RELEASES = [['version'=>'0.1.0-allinkl','date'=>'2026-10-13','title'=>'ALL-INKL-Webhosting-Variante','changes'=>[
-    'Eigenständige PHP/MariaDB-API für Shared Hosting; die Oberfläche läuft weiterhin als statische Web-App.',
-    'Einrichtung, Anmeldung, Kalender- und Aufgabendaten werden auf dem Webspace gespeichert.',
-    'Wetteransicht ist an Open-Meteo angebunden; automatische Softwareupdates und Google-Kalendersynchronisierung sind in dieser Variante noch nicht enthalten.'
+const APP_RELEASES = [['version'=>APP_VERSION,'date'=>'2026-10-13','title'=>'Sicherer Webzugang','changes'=>[
+    'Die Ersteinrichtung benötigt jetzt zusätzlich einen geheimen Schlüssel aus der config.php.',
+    'HTTPS, geschützte Sitzungscookies, private Bildauslieferung und ein Anmeldeschutz für alle Familiendaten sind aktiviert.',
+    'Nach Softwareupdates werden alte Sitzungen beendet; nach erneuter Anmeldung wird dieser Änderungsverlauf angezeigt.'
 ]]];
 
 function respond(mixed $value, int $status = 200): never {
@@ -45,6 +46,8 @@ function pdo(): PDO {
         $db->exec("CREATE TABLE IF NOT EXISTS fo_redemptions (id VARCHAR(100) PRIMARY KEY, member_id VARCHAR(100) NOT NULL, reward_id VARCHAR(100) NOT NULL, title VARCHAR(160) NOT NULL, cost INT NOT NULL, redeemed_at VARCHAR(40) NOT NULL) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci");
         $db->exec("CREATE TABLE IF NOT EXISTS fo_login_attempts (ip_hash CHAR(64) PRIMARY KEY, attempts INT NOT NULL, window_started INT NOT NULL)");
         $db->exec("INSERT IGNORE INTO fo_meta(meta_key,meta_value) VALUES ('revision','0'),('weather','{\"locations\":[],\"primaryId\":\"\"}')");
+        $q=$db->prepare('INSERT IGNORE INTO fo_meta(meta_key,meta_value) VALUES (?,?)');
+        $q->execute(['auth_generation',json_encode(bin2hex(random_bytes(32)))]);
     } catch (Throwable $e) { error_log('Organizer database error: ' . $e->getMessage()); fail('Datenbankverbindung fehlgeschlagen. Zugangsdaten in config.php prüfen.', 503); }
     return $db;
 }
@@ -89,7 +92,7 @@ function sendImage(string $area,string $name): never {
     if (!preg_match('/^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}\.(jpg|png|gif|webp)$/',$name)) fail('Bild nicht gefunden.',404);
     $file=dirname(__DIR__).'/data/'.$area.'/'.$name;if(!is_file($file))fail('Bild nicht gefunden.',404);
     $mime=['jpg'=>'image/jpeg','png'=>'image/png','gif'=>'image/gif','webp'=>'image/webp'][pathinfo($name,PATHINFO_EXTENSION)];
-    header('Content-Type: '.$mime);header('Cache-Control: private, max-age=3600');readfile($file);exit;
+    header('Content-Type: '.$mime);header('Cache-Control: private, no-store, max-age=0');header('Vary: Cookie');readfile($file);exit;
 }
 function remoteJson(string $url): array {
     $ctx=stream_context_create(['http'=>['method'=>'GET','timeout'=>12,'header'=>"Accept: application/json\r\nUser-Agent: FamilienOrganisierer/All-INKL\r\n"]]);
@@ -145,22 +148,30 @@ function stateData(string $version): array {
         'immichConfigured'=>false,'parentPasswordConfigured'=>!!meta('parentPassword'),'version'=>$version];
 }
 
-$configPath=dirname(__DIR__).'/config.php'; $cfg=is_file($configPath)?require $configPath:[]; $version=$cfg['version']??'0.1.0-allinkl';
+ini_set('display_errors','0'); error_reporting(E_ALL);
+$configPath=dirname(__DIR__).'/config.php'; $cfg=is_file($configPath)?require $configPath:[]; $version=APP_VERSION;
 header('X-Content-Type-Options: nosniff'); header('Referrer-Policy: no-referrer'); header('X-Frame-Options: DENY');
-header("Content-Security-Policy: default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' blob: data:; font-src 'self'; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'"); header('Cache-Control: no-store');
-session_name('family_session'); session_set_cookie_params(['lifetime'=>2592000,'path'=>'/','secure'=>(!empty($_SERVER['HTTPS'])&&$_SERVER['HTTPS']!=='off'),'httponly'=>true,'samesite'=>'Lax']); session_start();
+header("Content-Security-Policy: default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' blob: data: https:; font-src 'self'; connect-src 'self'; object-src 'none'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'"); header('Cache-Control: no-store, no-cache, must-revalidate, private'); header('Pragma: no-cache');
+if (!empty($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off') header('Strict-Transport-Security: max-age=31536000');
+session_name('family_session'); ini_set('session.use_strict_mode','1'); ini_set('session.use_only_cookies','1'); ini_set('session.use_trans_sid','0');
+session_set_cookie_params(['lifetime'=>604800,'path'=>'/api','secure'=>true,'httponly'=>true,'samesite'=>'Strict']); session_start();
 getBodyAllowed(); $db=pdo(); $path=parse_url($_SERVER['REQUEST_URI']??'/api',PHP_URL_PATH)?:'/api'; $path=preg_replace('#^/api#','',$path)?:'/'; $method=$_SERVER['REQUEST_METHOD']??'GET';
 try {
-    if ($path==='/health' && $method==='GET') respond(['ok'=>true,'version'=>$version]);
-    if ($path==='/status' && $method==='GET') respond(['configured'=>!!meta('password'),'authenticated'=>!empty($_SESSION['family_ok']),'version'=>$version,'googleConfigured'=>false,'platform'=>'allinkl']);
+    if ($path==='/status' && $method==='GET') respond(['configured'=>!!meta('password'),'authenticated'=>!empty($_SESSION['family_ok'])&&hash_equals((string)meta('auth_generation',''),(string)($_SESSION['auth_generation']??''))&&($_SESSION['app_version']??'')===APP_VERSION,'platform'=>'allinkl']);
     if ($path==='/setup' && $method==='POST') {
         if (meta('password')) fail('Diese Familienzentrale ist bereits eingerichtet.',409);
-        $d=inputJson(); $pw=(string)($d['password']??''); if (strlen($pw)<12||strlen($pw)>200) fail('Das Familienpasswort braucht 12 bis 200 Zeichen.');
+        $d=inputJson(); $setupKey=(string)($cfg['setup_key']??'');
+        if (strlen($setupKey)<32 || str_starts_with($setupKey,'REPLACE_') || !hash_equals($setupKey,(string)($d['setupKey']??''))) fail('Der Einrichtungsschlüssel stimmt nicht oder wurde nicht sicher eingerichtet.',403);
+        $pw=(string)($d['password']??''); if (strlen($pw)<12||strlen($pw)>200) fail('Das Familienpasswort braucht 12 bis 200 Zeichen.');
         $names=$d['names']??[]; if (!is_array($names)||count($names)<1||count($names)>20) fail('Bitte 1 bis 20 Familienmitglieder anlegen.');
-        $db->beginTransaction(); try { setMeta('password',password_hash($pw,PASSWORD_DEFAULT)); setMeta('settings',array_merge(APP_SETTINGS,['familyName'=>trim((string)($d['familyName']??'Unsere Familie'))]));
+        $db->beginTransaction(); try {
+            $db->query("SELECT meta_value FROM fo_meta WHERE meta_key='revision' FOR UPDATE")->fetchColumn();
+            $q=$db->query("SELECT meta_value FROM fo_meta WHERE meta_key='password' FOR UPDATE");
+            if ($q->fetchColumn()!==false) { $db->rollBack(); fail('Diese Familienzentrale ist bereits eingerichtet.',409); }
+            setMeta('password',password_hash($pw,PASSWORD_DEFAULT)); setMeta('settings',array_merge(APP_SETTINGS,['familyName'=>trim((string)($d['familyName']??'Unsere Familie'))]));
             $colors=['#6366f1','#ec4899','#0ea5e9','#f59e0b','#10b981','#8b5cf6']; foreach(array_values($names) as $i=>$name) putRecord('members',newId(),['name'=>trim((string)$name),'color'=>$colors[$i%count($colors)],'role'=>$i<2?'adult':'child','avatarImage'=>'']);
-            putRecord('lists','shopping',['title'=>'Einkaufsliste']); $db->commit();
-        } catch(Throwable $e){$db->rollBack();throw $e;} session_regenerate_id(true);$_SESSION['family_ok']=true; respond(['ok'=>true],201);
+            putRecord('lists','shopping',['title'=>'Einkaufsliste']); setMeta('auth_generation',bin2hex(random_bytes(32))); $db->commit();
+        } catch(Throwable $e){if($db->inTransaction())$db->rollBack();throw $e;} session_regenerate_id(true);$_SESSION['family_ok']=true;$_SESSION['auth_generation']=meta('auth_generation');$_SESSION['app_version']=APP_VERSION; respond(['ok'=>true],201);
     }
     if ($path==='/login' && $method==='POST') {
         $ip=hash('sha256',(string)($_SERVER['REMOTE_ADDR']??'unknown'));$q=$db->prepare('SELECT attempts,window_started FROM fo_login_attempts WHERE ip_hash=?');$q->execute([$ip]);$limiter=$q->fetch();$now=time();
@@ -168,11 +179,12 @@ try {
         $d=inputJson();if (!password_verify((string)($d['password']??''),(string)meta('password',''))) {
             $attempts=$limiter&&$now-(int)$limiter['window_started']<600?(int)$limiter['attempts']+1:1;$q=$db->prepare('INSERT INTO fo_login_attempts(ip_hash,attempts,window_started) VALUES (?,?,?) ON DUPLICATE KEY UPDATE attempts=VALUES(attempts),window_started=VALUES(window_started)');$q->execute([$ip,$attempts,$limiter&&$now-(int)$limiter['window_started']<600?(int)$limiter['window_started']:$now]);fail('Das Passwort stimmt nicht.',401);
         }
-        $q=$db->prepare('DELETE FROM fo_login_attempts WHERE ip_hash=?');$q->execute([$ip]);session_regenerate_id(true); $_SESSION['family_ok']=true; respond(['ok'=>true]);
+        $q=$db->prepare('DELETE FROM fo_login_attempts WHERE ip_hash=?');$q->execute([$ip]);session_regenerate_id(true); $_SESSION['family_ok']=true;$_SESSION['auth_generation']=meta('auth_generation');$_SESSION['app_version']=APP_VERSION; respond(['ok'=>true]);
     }
     if (str_starts_with($path,'/')) {
-        if (empty($_SESSION['family_ok'])) { header('Set-Cookie: family_session=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0'); respond(['error'=>'Bitte erneut anmelden.','code'=>'SESSION_EXPIRED','version'=>$version],401); }
-        if ($path==='/logout' && $method==='POST') { $_SESSION=[]; session_destroy(); respond(['ok'=>true]); }
+        if (empty($_SESSION['family_ok']) || !hash_equals((string)meta('auth_generation',''),(string)($_SESSION['auth_generation']??'')) || ($_SESSION['app_version']??'')!==APP_VERSION) { $_SESSION=[]; session_destroy(); setcookie(session_name(),'', ['expires'=>time()-3600,'path'=>'/api','secure'=>true,'httponly'=>true,'samesite'=>'Strict']); respond(['error'=>'Bitte erneut anmelden.','code'=>'SESSION_EXPIRED'],401); }
+        if ($path==='/health' && $method==='GET') respond(['ok'=>true]);
+        if ($path==='/logout' && $method==='POST') { $_SESSION=[]; session_destroy(); setcookie(session_name(),'', ['expires'=>time()-3600,'path'=>'/api','secure'=>true,'httponly'=>true,'samesite'=>'Strict']); respond(['ok'=>true]); }
         if ($path==='/state' && $method==='GET') respond(stateData($version));
         if ($path==='/changelog' && $method==='GET') respond(['version'=>$version,'previousVersion'=>'','changeId'=>$version,'releases'=>APP_RELEASES]);
         if ($path==='/export' && $method==='GET') { header('Content-Disposition: attachment; filename="familien-daten-'.date('Y-m-d').'.json"'); respond(['format'=>'familien-organisierer-export','version'=>$version,'exportedAt'=>gmdate(DATE_ATOM),...stateData($version)]); }
@@ -221,7 +233,7 @@ try {
             $id=(string)($d['requestId']??newId());$q=$db->prepare('INSERT IGNORE INTO fo_redemptions VALUES (?,?,?,?,?,?)');$q->execute([$id,$memberId,$reward['id'],$reward['title'],(int)$reward['cost'],gmdate(DATE_ATOM)]);bump();respond(['ok'=>true]);
         }
         if ($path==='/parent-password' && $method==='PUT') { $d=inputJson();$family=meta('password');if(!$family||!password_verify((string)($d['familyPassword']??''),(string)$family))fail('Das Familienpasswort stimmt nicht.',403);$old=meta('parentPassword');if($old&&!password_verify((string)($d['currentPassword']??''),(string)$old))fail('Das Elternpasswort stimmt nicht.',403);$new=(string)($d['newPassword']??'');if(strlen($new)<8||$new!==($d['confirmPassword']??''))fail('Bitte das neue Elternpasswort prüfen.');setMeta('parentPassword',password_hash($new,PASSWORD_DEFAULT));bump();respond(['ok'=>true]); }
-        if ($path==='/password' && $method==='POST') { $d=inputJson();$old=meta('password');if(!$old||!password_verify((string)($d['currentPassword']??''),(string)$old))fail('Das bisherige Passwort stimmt nicht.',401);$new=(string)($d['newPassword']??'');if(strlen($new)<12||strlen($new)>200)fail('Das Familienpasswort braucht 12 bis 200 Zeichen.');setMeta('password',password_hash($new,PASSWORD_DEFAULT));session_regenerate_id(true);respond(['ok'=>true]); }
+        if ($path==='/password' && $method==='POST') { $d=inputJson();$old=meta('password');if(!$old||!password_verify((string)($d['currentPassword']??''),(string)$old))fail('Das bisherige Passwort stimmt nicht.',401);$new=(string)($d['newPassword']??'');if(strlen($new)<12||strlen($new)>200)fail('Das Familienpasswort braucht 12 bis 200 Zeichen.');setMeta('password',password_hash($new,PASSWORD_DEFAULT));setMeta('auth_generation',bin2hex(random_bytes(32)));session_regenerate_id(true);$_SESSION['auth_generation']=meta('auth_generation');$_SESSION['app_version']=APP_VERSION;respond(['ok'=>true]); }
         fail('Funktion nicht gefunden.',404);
     }
 } catch (Throwable $e) { error_log('Organizer API error: '.$e->getMessage()); fail('Ein Serverfehler ist aufgetreten. Bitte erneut versuchen.',500); }
